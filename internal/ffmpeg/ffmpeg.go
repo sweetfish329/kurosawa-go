@@ -1,21 +1,22 @@
 package ffmpeg
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
-	"strings"
 )
 
-// Command represents an FFmpeg command builder
+// Command は FFmpeg コマンドビルダーを表します。
 type Command struct {
 	inputs  []string
 	outputs []string
 	options []string
 	filters []string
+	process *exec.Cmd // 実行中のプロセスを保持
 }
 
-// NewCommand creates a new FFmpeg command builder
+// NewCommand は新しい FFmpeg コマンドビルダーを作成します。
 func NewCommand() *Command {
 	return &Command{
 		inputs:  make([]string, 0),
@@ -25,47 +26,52 @@ func NewCommand() *Command {
 	}
 }
 
-// WithInput adds an input file to the command
+// WithInput は入力ファイルをコマンドに追加します。
 func (c *Command) WithInput(input string) *Command {
 	c.inputs = append(c.inputs, input)
 	return c
 }
 
-// WithOutput adds an output file to the command
+// WithOutput は出力ファイルをコマンドに追加します。
 func (c *Command) WithOutput(output string) *Command {
 	c.outputs = append(c.outputs, output)
 	return c
 }
 
-// WithOption adds an FFmpeg option to the command
+// WithOption は FFmpeg オプションをコマンドに追加します。
 func (c *Command) WithOption(name, value string) *Command {
 	c.options = append(c.options, name, value)
 	return c
 }
 
-// WithFilter adds a filter to the command
+// WithFilter はフィルターをコマンドに追加します。
 func (c *Command) WithFilter(filter string) *Command {
 	c.filters = append(c.filters, filter)
 	return c
 }
 
-// buildArgs builds the FFmpeg command arguments
+// WithFilterComplex は複雑なフィルターグラフをコマンドに追加します。
+func (c *Command) WithFilterComplex(filter string) *Command {
+	if filter != "" {
+		c.options = append(c.options, "-filter_complex", filter)
+	}
+	return c
+}
+
+// buildArgs は FFmpeg コマンドの引数を構築します。
 func (c *Command) buildArgs() []string {
 	args := make([]string, 0)
+
+	// Add global options (before inputs)
+	args = append(args, "-y") // 既存ファイルを上書き
 
 	// Add inputs
 	for _, input := range c.inputs {
 		args = append(args, "-i", input)
 	}
 
-	// Add options
+	// Add options and filter complex
 	args = append(args, c.options...)
-
-	// Add filters if any
-	if len(c.filters) > 0 {
-		filterStr := strings.Join(c.filters, ",")
-		args = append(args, "-vf", filterStr)
-	}
 
 	// Add outputs
 	args = append(args, c.outputs...)
@@ -73,28 +79,47 @@ func (c *Command) buildArgs() []string {
 	return args
 }
 
-// Run executes the FFmpeg command
-func (c *Command) Run() error {
+// Start はコンテキスト付きで FFmpeg プロセスを開始します。
+func (c *Command) Start(ctx context.Context) error {
 	args := c.buildArgs()
-	cmd := exec.Command("ffmpeg", args...)
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ffmpeg command failed: %w", err)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start ffmpeg process: %w", err)
+	}
+
+	c.process = cmd
+	return nil
+}
+
+// Stop は FFmpeg プロセスを正常に停止します。
+func (c *Command) Stop() error {
+	if c.process == nil || c.process.Process == nil {
+		return fmt.Errorf("no running ffmpeg process")
+	}
+
+	if err := c.process.Process.Signal(os.Interrupt); err != nil {
+		return fmt.Errorf("failed to stop ffmpeg process: %w", err)
+	}
+
+	if err := c.process.Wait(); err != nil {
+		return fmt.Errorf("failed to wait for ffmpeg process: %w", err)
 	}
 
 	return nil
 }
 
-// StartProcess starts an FFmpeg process and returns the command
-func (c *Command) StartProcess() (*exec.Cmd, error) {
-	args := c.buildArgs()
-	cmd := exec.Command("ffmpeg", args...)
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start ffmpeg process: %w", err)
+// Run はコンテキスト付きで FFmpeg コマンドを実行し、完了を待ちます。
+func (c *Command) Run(ctx context.Context) error {
+	if err := c.Start(ctx); err != nil {
+		return err
 	}
+	return c.process.Wait()
+}
 
-	return cmd, nil
+// Process は基底の exec.Cmd を返します。
+func (c *Command) Process() *exec.Cmd {
+	return c.process
 }

@@ -1,32 +1,49 @@
-// Package recorder provides screen recording functionality using FFmpeg.
-// Example usage:
+// パッケージ recorder は FFmpeg を使用した画面録画機能を提供します。
+// 使用例：
 //
 //	recorder := recorder.NewRecorder("output.mp4", 30)
 //	recorder.WithArea("1920x1080")
 //	err := recorder.Start()
-//	if err != nil {
+//	if (err != nil) {
 //		log.Fatal(err)
 //	}
-//	// ... recording ...
+//	// ... 録画中 ...
 //	err = recorder.Stop()
 package recorder
 
 import (
+	"context"
 	"fmt"
-	"os"
 
 	"kurosawa-go/internal/ffmpeg"
 )
 
-// Recorder represents a screen recorder.
+// Options は録画のオプションを定義します。
+type Options struct {
+	Area      string
+	Framerate int
+	Quality   string
+}
+
+// NewOptions はデフォルトのオプションを返します。
+func NewOptions() *Options {
+	return &Options{
+		Area:      "1920x1080",
+		Framerate: 30,
+		Quality:   "medium",
+	}
+}
+
+// Recorder は画面レコーダーを表します。
 type Recorder struct {
 	area       string
 	framerate  int
 	outputPath string
 	cmd        *ffmpeg.Command
+	cancel     context.CancelFunc // doneチャネルの代わりにcancel funcを保持
 }
 
-// NewRecorder creates a new screen recorder with specified output path and framerate.
+// NewRecorder は指定された出力パスとフレームレートで新しい画面レコーダーを作成します。
 func NewRecorder(outputPath string, framerate int) *Recorder {
 	return &Recorder{
 		framerate:  framerate,
@@ -34,23 +51,26 @@ func NewRecorder(outputPath string, framerate int) *Recorder {
 	}
 }
 
-// WithArea sets the recording area.
+// WithArea は録画領域を設定します。
 func (r *Recorder) WithArea(area string) *Recorder {
 	r.area = area
 	return r
 }
 
-// WithFramerate sets the frame rate.
+// WithFramerate はフレームレートを設定します。
 func (r *Recorder) WithFramerate(framerate int) *Recorder {
 	r.framerate = framerate
 	return r
 }
 
-// Start starts the screen recording.
-func (r *Recorder) Start() error {
+// Start はコンテキスト付きで画面録画を開始します。
+func (r *Recorder) Start(ctx context.Context) error {
+	// 親contextから新しいcancelable contextを作成
+	recordCtx, cancel := context.WithCancel(ctx)
+	r.cancel = cancel
+
 	cmd := ffmpeg.NewCommand()
 
-	// Apply OS-specific settings
 	if err := applyOSSettings(cmd); err != nil {
 		return fmt.Errorf("failed to apply OS settings: %w", err)
 	}
@@ -63,30 +83,44 @@ func (r *Recorder) Start() error {
 
 	cmd.WithOutput(r.outputPath)
 
-	process, err := cmd.StartProcess()
-	if err != nil {
+	if err := cmd.Start(recordCtx); err != nil {
+		r.cancel()
 		return fmt.Errorf("failed to start recording: %w", err)
 	}
 
-	r.cmd = process
+	r.cmd = cmd
+
 	return nil
 }
 
-// Stop stops the screen recording.
+// Stop は画面録画を停止します。
 func (r *Recorder) Stop() error {
-	if r.cmd == nil || r.cmd.Process == nil {
+	if r.cmd == nil {
 		return fmt.Errorf("recording is not running")
 	}
+	if r.cancel != nil {
+		r.cancel() // contextをキャンセルして録画を停止
+	}
+	return r.cmd.Stop()
+}
 
-	// Send SIGINT to stop ffmpeg
-	if err := r.cmd.Process.Signal(os.Interrupt); err != nil {
-		return fmt.Errorf("failed to stop recording: %w", err)
+// Recorder はシンプルな画面録画インターフェースを提供します。
+func Record(ctx context.Context, output string, opts *Options) error {
+	if opts == nil {
+		opts = NewOptions()
 	}
 
-	// Wait for the command to exit.
-	if err := r.cmd.Wait(); err != nil {
-		return fmt.Errorf("failed to wait for recording to stop: %w", err)
+	cmd := ffmpeg.NewCommand()
+	if err := applyOSSettings(cmd); err != nil {
+		return fmt.Errorf("failed to configure recorder: %w", err)
 	}
 
-	return nil
+	cmd.WithOption("-framerate", fmt.Sprintf("%d", opts.Framerate))
+	if opts.Area != "" {
+		cmd.WithOption("-video_size", opts.Area)
+	}
+	cmd.WithOption("-preset", opts.Quality)
+	cmd.WithOutput(output)
+
+	return cmd.Run(ctx)
 }

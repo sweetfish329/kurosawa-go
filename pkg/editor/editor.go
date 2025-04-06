@@ -1,128 +1,71 @@
-// Package editor provides video editing functionality using FFmpeg.
-// Example usage:
-//
-//	editor := editor.NewEditor("input.mp4")
-//	err := editor.
-//		Trim("00:00:00", "00:00:30").
-//		Resize("1280x720").
-//		SaveAs("output.mp4")
 package editor
 
 import (
+	"context"
 	"fmt"
-	"os/exec"
 	"time"
 
-	"kurosawa-go/ffmpeg"
+	"kurosawa-go/internal/ffmpeg"
+	"kurosawa-go/pkg/editor/effect"
 )
 
-// Editor represents a video editor instance
+// Editor は動画編集の主要なインターフェースを提供します。
 type Editor struct {
-	inputPath string
-	startTime string
-	duration  string
-	size      string
-	filters   []string
+	input    string
+	output   string
+	effects  []effect.Effect
+	duration time.Duration
 }
 
-// NewEditor creates a new video editor instance
-func NewEditor(inputPath string) *Editor {
+// New は新しい Editor インスタンスを作成します。
+func New(input string) *Editor {
 	return &Editor{
-		inputPath: inputPath,
-		filters:   make([]string, 0),
+		input:   input,
+		effects: make([]effect.Effect, 0),
 	}
 }
 
-// Trim sets the start time and duration for video trimming
-func (e *Editor) Trim(start, duration string) *Editor {
-	e.startTime = start
+// Output は出力ファイルを設定します。
+func (e *Editor) Output(path string) *Editor {
+	e.output = path
+	return e
+}
+
+// Trim は動画をトリミングします。
+func (e *Editor) Trim(start, duration time.Duration) *Editor {
 	e.duration = duration
 	return e
 }
 
-// Resize sets the output video size
-func (e *Editor) Resize(size string) *Editor {
-	e.size = size
+// Resize は動画サイズを変更します。
+func (e *Editor) Resize(width, height int) *Editor {
+	e.effects = append(e.effects, &effect.ResizeEffect{
+		Width:  width,
+		Height: height,
+	})
 	return e
 }
 
-// SaveAs processes the video with the specified settings and saves to outputPath
-func (e *Editor) SaveAs(outputPath string) error {
-	args := []string{"-i", e.inputPath}
-
-	if e.startTime != "" {
-		args = append(args, "-ss", e.startTime)
-	}
-	if e.duration != "" {
-		args = append(args, "-t", e.duration)
-	}
-	if e.size != "" {
-		args = append(args, "-s", e.size)
-	}
-
-	args = append(args, "-y", outputPath)
-
-	cmd := exec.Command("ffmpeg", args...)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to process video: %w", err)
-	}
-
-	return nil
+// AddEffect はエフェクトを追加します。
+func (e *Editor) AddEffect(effect effect.Effect) *Editor {
+	e.effects = append(e.effects, effect)
+	return e
 }
 
-// Clip represents a video clip.
-type Clip struct {
-	path   string
-	editor *Editor
-}
-
-// Clip creates a new video clip.
-func (e *Editor) Clip(path string) *Clip {
-	return &Clip{path: path, editor: e}
-}
-
-// TrimOptions represents options for trimming a video.
-type TrimOptions struct {
-	StartTime time.Duration
-	EndTime   time.Duration
-}
-
-// Trim trims a video clip.
-func (c *Clip) Trim(outputPath string, options TrimOptions) error {
-	// FFmpeg command.
+// Process は設定された編集内容を処理します。
+func (e *Editor) Process(ctx context.Context) error {
 	cmd := ffmpeg.NewCommand().
-		WithInput(c.path).
-		WithOption("-ss", fmt.Sprintf("%.3f", options.StartTime.Seconds())).
-		WithOption("-to", fmt.Sprintf("%.3f", options.EndTime.Seconds())).
-		WithOutput(outputPath)
+		WithInput(e.input).
+		WithOutput(e.output)
 
-	return cmd.Run()
-}
+	// エフェクトの適用
+	if len(e.effects) > 0 {
+		var filters []string
+		for _, ef := range e.effects {
+			filters = append(filters, ef.Apply(nil))
+		}
+		cmd.WithFilterComplex(fmt.Sprintf("%s", filters[0]))
+	}
 
-// Image represents an image.
-type Image struct {
-	path   string
-	editor *Editor
-}
-
-// Image creates a new image.
-func (e *Editor) Image(path string) *Image {
-	return &Image{path: path, editor: e}
-}
-
-// ResizeOptions represents options for resizing an image.
-type ResizeOptions struct {
-	Width  int
-	Height int
-}
-
-// Resize resizes an image.
-func (i *Image) Resize(outputPath string, options ResizeOptions) error {
-	// FFmpeg command.
-	cmd := ffmpeg.NewCommand().
-		WithInput(i.path).
-		WithOption("-vf", fmt.Sprintf("scale=%d:%d", options.Width, options.Height)).
-		WithOutput(outputPath)
-
-	return cmd.Run()
+	return cmd.Run(ctx)
 }
